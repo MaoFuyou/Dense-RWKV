@@ -144,8 +144,8 @@ class WKV(torch.autograd.Function):
 def RUN_CUDA(B, T, C, w, u, k, v):
     return WKV.apply(B, T, C, w.cuda(), u.cuda(), k.cuda(), v.cuda())
 
-
-def q_shift(input, shift_pixel=1, gamma=1/4, patch_resolution=None):
+#Tips ,with a large pixel shift and lower change!
+def L_shift(input, shift_pixel=3, gamma=1/8, patch_resolution=None):
     assert gamma <= 1/4
     B, N, C = input.shape
     input = input.transpose(1, 2).reshape(B, C, patch_resolution[0], patch_resolution[1])
@@ -313,49 +313,6 @@ class UpBlock(nn.Module):
         x = self.proj_drop(x)
         x = self.upsample(x)
         return x
-
-class iR_RWKV(nn.Module):
-    def __init__(self, dim_in, dim_out, norm_in=True, has_skip=True, exp_ratio=1.0, norm_layer='bn_2d',
-                 act_layer='relu', dw_ks=3, stride=1, dilation=1, se_ratio=0.0,
-                 attn_s=True, drop_path=0., drop=0.,img_size=224, channel_gamma=1/4, shift_pixel=1):
-        super().__init__()
-        self.norm = get_norm(norm_layer)(dim_in) if norm_in else nn.Identity()
-        dim_mid = int(dim_in * exp_ratio)
-        self.ln1 = nn.LayerNorm(dim_mid)
-        self.conv = ConvNormAct(dim_in, dim_mid, kernel_size=1)
-        self.has_skip = (dim_in == dim_out and stride == 1) and has_skip
-        if attn_s==True:
-                self.att = VRWKV_SpatialMix(dim_mid, channel_gamma, shift_pixel)
-        self.se = SE(dim_mid, rd_ratio=se_ratio, act_layer=get_act(act_layer)) if se_ratio > 0.0 else nn.Identity()
-        self.proj_drop = nn.Dropout(drop)
-        self.proj = ConvNormAct(dim_mid, dim_out, kernel_size=1, norm_layer='none', act_layer='none', inplace=inplace)
-        self.drop_path = DropPath(drop_path) if drop_path else nn.Identity()
-        self.attn_s=attn_s
-        self.conv_local = ConvNormAct(dim_mid, dim_mid, kernel_size=dw_ks, stride=stride, dilation=dilation, groups=dim_mid, norm_layer='bn_2d', act_layer='silu', inplace=inplace)
-    def forward(self, x):
-        shortcut = x
-        x = self.norm(x)
-        x = self.conv(x)
-        if self.attn_s:
-            B, hidden, H, W = x.size()
-            patch_resolution = (H,  W)
-            x = x.view(B, hidden, -1)  # (B, hidden, H*W) = (B, C, N)
-            
-            x = x.permute(0, 2, 1)
-            x = x + self.drop_path(self.ln1(self.att(x, patch_resolution)))
-            
-            B, n_patch, hidden = x.size()  # reshape from (B, n_patch, hidden) to (B, h, w, hidde
-            h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
-            x = x.permute(0, 2, 1)
-            x = x.contiguous().view(B, hidden, h, w)
-            
-        x = x + self.se(self.conv_local(x)) if self.has_skip else self.se(self.conv_local(x))
-        x = self.proj_drop(x)
-        x = self.proj(x)
-        x = (shortcut + self.drop_path(x)) if self.has_skip else x
-        
-        return x
-
 
 class RWKV_UNet_encoder(nn.Module):
     def __init__(self, dim_in=3, num_classes=1000, img_size=224,
@@ -527,6 +484,7 @@ class RWKV_UNet(nn.Module):
     def forward(self, x):
         # Encoder path
         input=x
+      # Frequency Space Transform
         fft_x = torch.fft.fft2(input)
         fft_x_real_imag = torch.view_as_real(fft_x)
         fft_x_real_imag = fft_x_real_imag.permute(0, 1, 4, 2, 3)
